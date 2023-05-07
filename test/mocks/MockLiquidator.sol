@@ -1,13 +1,11 @@
 pragma solidity 0.8.10;
 
-import {LendingPool, ERC4626, ERC20, PriceOracle, FixedPointMathLib} from "../../src/LendingPool.sol";
+import {LendingPool, ERC20, PriceOracle} from "../../src/LendingPool.sol";
 import "ds-test/test.sol";
 
 /// @title Mock Liquidator 
 /// @dev A test implementation of the Liquidator contract.
 contract MockLiquidator is DSTest {
-    using FixedPointMathLib for uint256;
-
     LendingPool pool;
     PriceOracle oracle;
 

@@ -4,24 +4,19 @@ pragma solidity 0.8.10;
 import {LendingPool} from "./LendingPool.sol";
 import {PriceOracle} from "./interface/PriceOracle.sol";
 
-import {Auth, Authority} from "solmate/auth/Auth.sol";
-import {Bytes32AddressLib} from "solmate/utils/Bytes32AddressLib.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title Lending Pool Factory
 /// @author Jet Jadeja <jet@pentagon.xyz>
 /// @notice Factory used to deploy isolated lending pools.
-contract LendingPoolFactory is Auth {
-    using Bytes32AddressLib for address;
-    using Bytes32AddressLib for bytes32;
-
+contract LendingPoolFactory is Ownable {
     /*///////////////////////////////////////////////////////////////
                                CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Creates a Vault factory.
-    /// @param _owner The owner of the factory.
-    /// @param _authority The Authority of the factory.
-    constructor(address _owner, Authority _authority) Auth(_owner, _authority) {}
+    constructor(address _owner) {
+        _transferOwnership(_owner);
+    }
 
     /*///////////////////////////////////////////////////////////////
                            POOL DEPLOYMENT LOGIC

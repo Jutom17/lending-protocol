@@ -3,25 +3,20 @@ pragma solidity 0.8.10;
 
 import {LendingPoolFactory} from "./LendingPoolFactory.sol";
 
-import {ERC20} from "solmate/tokens/ERC20.sol";
-import {ERC4626} from "solmate/mixins/ERC4626.sol";
-import {Auth, Authority} from "solmate/auth/Auth.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 import {PriceOracle} from "./interface/PriceOracle.sol";
 import {InterestRateModel} from "./interface/InterestRateModel.sol";
 import {FlashBorrower} from "./interface/FlashBorrower.sol";
 
-import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
-import {SafeCastLib} from "solmate/utils/SafeCastLib.sol";
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title Lending Pool
 /// @author Jet Jadeja <jet@pentagon.xyz>
 /// @notice Minimal, gas optimized lending pool contract
-contract LendingPool is Auth {
-    using SafeTransferLib for ERC20;
-    using SafeCastLib for uint256;
-    using FixedPointMathLib for uint256;
+contract LendingPool is Ownable {
+    using SafeERC20 for ERC20;
 
     /*///////////////////////////////////////////////////////////////
                                 IMMUTABLES
@@ -32,9 +27,10 @@ contract LendingPool is Auth {
 
     /// @notice Create a new Lending Pool.
     /// @dev Retrieves the pool name from the LendingPoolFactory contract.
-    constructor() Auth(Auth(msg.sender).owner(), Auth(msg.sender).authority()) {
+    constructor() {
         // Retrieve the name from the factory contract.
         name = LendingPoolFactory(msg.sender).poolDeploymentName();
+        _transferOwnership(msg.sender);
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -51,7 +47,7 @@ contract LendingPool is Auth {
 
     /// @notice Sets a new oracle contract.
     /// @param newOracle The address of the new oracle.
-    function setOracle(PriceOracle newOracle) external requiresAuth {
+    function setOracle(PriceOracle newOracle) external onlyOwner {
         // Update the oracle.
         oracle = newOracle;
 
@@ -75,7 +71,7 @@ contract LendingPool is Auth {
     /// @notice Sets a new Interest Rate Model for a specfic asset.
     /// @param asset The underlying asset.
     /// @param newInterestRateModel The new IRM address.
-    function setInterestRateModel(ERC20 asset, InterestRateModel newInterestRateModel) external requiresAuth {
+    function setInterestRateModel(ERC20 asset, InterestRateModel newInterestRateModel) external onlyOwner {
         // Update the asset's Interest Rate Model.
         interestRateModels[asset] = newInterestRateModel;
 
@@ -87,8 +83,7 @@ contract LendingPool is Auth {
                           ASSET CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Maps underlying tokens to the ERC4626 vaults where they are held.
-    mapping(ERC20 => ERC4626) public vaults;
+    mapping(ERC20 => address) public vaults;
 
     /// @notice Maps underlying tokens to their configurations.
     mapping(ERC20 => Configuration) public configurations;
@@ -97,15 +92,10 @@ contract LendingPool is Auth {
     /// 10**asset.decimals().
     mapping(ERC20 => uint256) public baseUnits;
 
-    /// @notice Emitted when a new asset is added to the pool.
-    /// @param user The authorized user who triggered the change.
-    /// @param asset The underlying asset.
-    /// @param vault The ERC4626 vault where the underlying tokens will be held.
-    /// @param configuration The lend/borrow factors for the asset.
     event AssetConfigured(
         address indexed user,
         ERC20 indexed asset,
-        ERC4626 indexed vault,
+        address indexed vault,
         Configuration configuration
     );
 
@@ -121,15 +111,11 @@ contract LendingPool is Auth {
         uint256 borrowFactor;
     }
 
-    /// @notice Adds a new asset to the pool.
-    /// @param asset The underlying asset.
-    /// @param vault The ERC4626 vault where the underlying tokens will be held.
-    /// @param configuration The lend/borrow factors for the asset.
     function configureAsset(
         ERC20 asset,
-        ERC4626 vault,
+        address vault,
         Configuration memory configuration
-    ) external requiresAuth {
+    ) external onlyOwner {
         // Ensure that this asset has not been configured.
         require(address(vaults[asset]) == address(0), "ASSET_ALREADY_CONFIGURED");
 
@@ -145,7 +131,7 @@ contract LendingPool is Auth {
     /// @notice Updates the lend/borrow factors of an asset.
     /// @param asset The underlying asset.
     /// @param newConfiguration The new lend/borrow factors for the asset.
-    function updateConfiguration(ERC20 asset, Configuration memory newConfiguration) external requiresAuth {
+    function updateConfiguration(ERC20 asset, Configuration memory newConfiguration) external onlyOwner {
         // Update the asset configuration.
         configurations[asset] = newConfiguration;
 
@@ -198,7 +184,7 @@ contract LendingPool is Auth {
         asset.safeTransferFrom(msg.sender, address(this), amount);
 
         // Deposit the underlying tokens into the designated vault.
-        ERC4626 vault = vaults[asset];
+        address vault = vaults[asset];
         asset.approve(address(vault), amount);
         vault.deposit(amount, address(this));
 
@@ -375,7 +361,7 @@ contract LendingPool is Auth {
         borrower.execute(amount, data);
 
         // Ensure the sufficient amount has been returned.
-        ERC4626 vault = vaults[asset];
+        address vault = vaults[asset];
         require(vault.convertToAssets(vault.balanceOf(address(this))) + amount > liquidity, "AMOUNT_NOT_RETURNED");
         // Reset the flash borrow amount.
         delete flashBorrowed[asset];
@@ -505,8 +491,7 @@ contract LendingPool is Auth {
     /// @notice Returns the amount of underlying tokens held in this contract.
     /// @param asset The underlying asset.
     function availableLiquidity(ERC20 asset) public view returns (uint256) {
-        // Return the LendingPool's underlying balance in the designated ERC4626 vault.
-        ERC4626 vault = vaults[asset];
+        address vault = vaults[asset];
         return vault.convertToAssets(vault.balanceOf(address(this)));
     }
 

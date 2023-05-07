@@ -1,6 +1,6 @@
 pragma solidity 0.8.10;
 
-import {LendingPool, ERC4626, ERC20} from "../../src/LendingPool.sol";
+import {LendingPool, ERC20} from "../../src/LendingPool.sol";
 import "ds-test/test.sol";
 
 /// @title Mock Flash Borrower
@@ -12,7 +12,7 @@ contract MockFlashBorrower is DSTest {
         ERC20 asset = ERC20(abi.decode(data, (address)));
 
         // Get the address of the Vault.
-        ERC4626 vault = LendingPool(msg.sender).vaults(asset);
+        address vault = LendingPool(msg.sender).vaults(asset);
 
         // Approve tokens to the Vault.
         asset.approve(address(vault), amount);

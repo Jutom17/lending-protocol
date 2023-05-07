@@ -1,6 +1,6 @@
 pragma solidity 0.8.10;
 
-import {LendingPool, ERC4626, ERC20} from "../../src/LendingPool.sol";
+import {LendingPool, ERC20} from "../../src/LendingPool.sol";
 import {FlashBorrower} from "../../src/interface/FlashBorrower.sol";
 import "ds-test/test.sol";
 
@@ -16,7 +16,7 @@ contract MockFlashBorrower2 is DSTest {
         LendingPool pool = LendingPool(msg.sender);
 
         // Get the address of the Vault.
-        ERC4626 vault = pool.vaults(asset);
+        address vault = pool.vaults(asset);
 
         // Try to call flashBorrow again.
         pool.flashBorrow(

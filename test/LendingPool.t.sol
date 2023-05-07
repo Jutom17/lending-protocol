@@ -4,40 +4,34 @@ pragma solidity 0.8.10;
 import {LendingPool, LendingPoolFactory} from "src/LendingPoolFactory.sol";
 
 // TODO: I should not have to import ERC20 from here.
-import {ERC20} from "solmate/utils/SafeTransferLib.sol";
-import {DSTestPlus} from "solmate/test/utils/DSTestPlus.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-import {Authority} from "solmate/auth/Auth.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import {DSTest} from "ds-test/test.sol";
 
 import {PriceOracle} from "src/interface/PriceOracle.sol";
 import {InterestRateModel} from "src/interface/InterestRateModel.sol";
 import {FlashBorrower} from "src/interface/FlashBorrower.sol";
 
-import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
-import {MockERC4626} from "./mocks/MockERC4626.sol";
+import "@openzeppelin/contracts/mocks/ERC20Mock.sol";
 import {MockPriceOracle} from "./mocks/MockPriceOracle.sol";
 import {MockFlashBorrower} from "./mocks/MockFlashBorrower.sol";
 import {MockFlashBorrower2} from "./mocks/MockFlashBorrower2.sol";
 import {MockInterestRateModel} from "./mocks/MockInterestRateModel.sol";
 import {MockLiquidator} from "./mocks/MockLiquidator.sol";
 
-import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
-
 /// @title Lending Pool Factory Test Contract
-contract LendingPoolTest is DSTestPlus {
-    using FixedPointMathLib for uint256;
-
+contract LendingPoolTest is DSTest {
     /* Lending Pool Contracts */
     LendingPoolFactory factory;
     LendingPool pool;
 
     /* Mocks */
-    MockERC20 asset;
-    MockERC4626 vault;
+    ERC20Mock asset;
+    address vault;
 
-    MockERC20 borrowAsset;
-    MockERC4626 borrowVault;
+    ERC20Mock borrowAsset;
+    address borrowVault;
 
     MockPriceOracle oracle;
     MockFlashBorrower flashBorrower;
@@ -49,8 +43,8 @@ contract LendingPoolTest is DSTestPlus {
         factory = new LendingPoolFactory(address(this), Authority(address(0)));
         (pool, ) = factory.deployLendingPool("Lending Pool Test");
 
-        asset = new MockERC20("Test Token", "TEST", 18);
-        vault = new MockERC4626(ERC20(asset), "Test Token Vault", "TEST");
+        asset = new ERC20Mock("Test Token", "TEST", 18);
+        vault = address(ERC20(asset), "Test Token Vault", "TEST");
         
         interestRateModel = new MockInterestRateModel();
 
@@ -61,8 +55,8 @@ contract LendingPoolTest is DSTestPlus {
         oracle.updatePrice(ERC20(asset), 1e18);
         pool.setOracle(PriceOracle(address(oracle)));
 
-        borrowAsset = new MockERC20("Borrow Test Token", "TBT", 18);
-        borrowVault = new MockERC4626(ERC20(borrowAsset), "Borrow Test Token Vault", "TBT");
+        borrowAsset = new ERC20Mock("Borrow Test Token", "TBT", 18);
+        borrowVault = address(ERC20(borrowAsset), "Borrow Test Token Vault", "TBT");
 
         pool.configureAsset(borrowAsset, borrowVault, LendingPool.Configuration(0, 1e18));
         pool.setInterestRateModel(borrowAsset, InterestRateModel(address(interestRateModel)));
@@ -94,7 +88,7 @@ contract LendingPoolTest is DSTestPlus {
         MockPriceOracle newOracle = new MockPriceOracle();
         newOracle.updatePrice(ERC20(asset), 1e18);
 
-        hevm.prank(address(0xBABE));
+        vm.prank(address(0xBABE));
         pool.setOracle(PriceOracle(address(newOracle)));
     }
 
@@ -120,7 +114,7 @@ contract LendingPoolTest is DSTestPlus {
     function testFailNewIRMConfigurationNotOwner() public {
         
         MockInterestRateModel newInterestRateModel = new MockInterestRateModel();
-        hevm.prank(address(0xBABE));
+        vm.prank(address(0xBABE));
         pool.setInterestRateModel(asset, InterestRateModel(address(newInterestRateModel)));
     }
 
@@ -138,8 +132,8 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testNewAssetConfiguration() public {
-        MockERC20 newAsset = new MockERC20("New Test Token", "TEST", 18);
-        MockERC4626 newVault = new MockERC4626(ERC20(asset), "New Test Token Vault", "TEST");
+        ERC20Mock newAsset = new ERC20Mock("New Test Token", "TEST", 18);
+        address newVault = address(ERC20(asset), "New Test Token Vault", "TEST");
         
         pool.configureAsset(newAsset, newVault, LendingPool.Configuration(0.6e18, 0));
         
@@ -164,15 +158,15 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     function testFailNewAssetConfigurationNotOwner() public {
-        MockERC20 newAsset = new MockERC20("New Test Token", "TEST", 18);
-        MockERC4626 newVault = new MockERC4626(ERC20(asset), "New Test Token Vault", "TEST");
+        ERC20Mock newAsset = new ERC20Mock("New Test Token", "TEST", 18);
+        address newVault = address(ERC20(asset), "New Test Token Vault", "TEST");
     
-        hevm.prank(address(0xBABE));
+        vm.prank(address(0xBABE));
         pool.configureAsset(newAsset, newVault, LendingPool.Configuration(0.6e18, 0));
     }
 
     function testFailUpdateConfigurationNotOwner() public {
-        hevm.prank(address(0xBABE));
+        vm.prank(address(0xBABE));
         pool.updateConfiguration(asset, LendingPool.Configuration(0.9e18, 0)); 
     }
 
@@ -181,7 +175,7 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     function testDeposit(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Mint, approve, and deposit the asset.
         mintAndApprove(asset, amount);
@@ -194,7 +188,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testWithdrawal(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Mint, approve, and deposit the asset.
         testDeposit(amount);
@@ -234,7 +228,7 @@ contract LendingPoolTest is DSTestPlus {
     
     function testFailDepositAssetNotInPool() public {
         // Mock token.
-        MockERC20 mockAsset = new MockERC20("Mock Token", "MKT", 18);
+        ERC20Mock mockAsset = new ERC20Mock("Mock Token", "MKT", 18);
         
         // Mint tokens.
         mockAsset.mint(address(this), 1e18);
@@ -259,7 +253,7 @@ contract LendingPoolTest is DSTestPlus {
     
     function testFailWithdrawAssetNotInPool() public {
         // Mock token.
-        MockERC20 mockAsset = new MockERC20("Mock Token", "MKT", 18);
+        ERC20Mock mockAsset = new ERC20Mock("Mock Token", "MKT", 18);
         
         // Mint tokens.
         testDeposit(1e18);
@@ -306,7 +300,7 @@ contract LendingPoolTest is DSTestPlus {
         pool.disableAsset(asset);
 
         // Checks.
-        assertFalse(pool.enabledCollateral(address(this), asset));
+        assertTrue(!pool.enabledCollateral(address(this), asset));
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -314,7 +308,7 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     function testBorrow(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Deposit tokens and enable them as collateral.
         mintAndApprove(asset, amount);
@@ -342,7 +336,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testRepay(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Borrow tokens.
         testBorrow(amount);
@@ -361,7 +355,7 @@ contract LendingPoolTest is DSTestPlus {
         testBorrow(amount);
 
         // Warp block number to 6.
-        hevm.roll(block.number + 5);
+        vm.roll(block.number + 5);
 
         // Calculate the expected amount (after interest).
         // The borrow rate is constant, so the interest is always 5% per block.
@@ -381,7 +375,7 @@ contract LendingPoolTest is DSTestPlus {
 
     function testFailBorrowAssetNotInPool() public {
         // Mock token.
-        MockERC20 mockAsset = new MockERC20("Mock Token", "MKT", 18);
+        ERC20Mock mockAsset = new ERC20Mock("Mock Token", "MKT", 18);
         
         // Amount to mint.
         uint256 amount = 1e18;
@@ -406,7 +400,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testFailBorrowWithCollateralDisabled(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Deposit tokens and enable them as collateral.
         mintAndApprove(asset, amount);
@@ -428,7 +422,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testFailBorrowWithNoCollateral(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Mint borrow tokens and supply them to the pool.
         mintAndApprove(borrowAsset, amount);
@@ -446,7 +440,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testFailBorrowWithNotEnoughCollateral(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
 
         // Deposit tokens and enable them as collateral.
         mintAndApprove(asset, amount);
@@ -483,7 +477,7 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     function testFlashBorrow(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         flashBorrower = new MockFlashBorrower();
         
@@ -506,7 +500,7 @@ contract LendingPoolTest is DSTestPlus {
         bytes memory data = abi.encode(address(borrowAsset));
 
         // Approve pool to use 'amount' from flashBorrower
-        hevm.startPrank(address(flashBorrower));
+        vm.startPrank(address(flashBorrower));
         borrowVault.approve(address(pool), amount);
 
         pool.flashBorrow(
@@ -525,7 +519,7 @@ contract LendingPoolTest is DSTestPlus {
     // - Not Enough Liquidity to flash borrow
     // - Ensure that a flash Borrow is not occuring
     function testFailFlashBorrowNotEnoughLiquidity(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         flashBorrower = new MockFlashBorrower();
         
@@ -548,7 +542,7 @@ contract LendingPoolTest is DSTestPlus {
         bytes memory data = abi.encode(address(borrowAsset));
 
         // Approve pool to use 'amount' from flashBorrower
-        hevm.startPrank(address(flashBorrower));
+        vm.startPrank(address(flashBorrower));
         borrowVault.approve(address(pool), amount);
 
         pool.flashBorrow(
@@ -560,7 +554,7 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testFailFlashBorrowTwice(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         flashBorrower2 = new MockFlashBorrower2();
         
@@ -583,7 +577,7 @@ contract LendingPoolTest is DSTestPlus {
         bytes memory data = abi.encode(address(borrowAsset));
 
         // Approve pool to use 'amount' from flashBorrower
-        hevm.startPrank(address(flashBorrower2));
+        vm.startPrank(address(flashBorrower2));
         borrowVault.approve(address(pool), amount);
 
         // Flash borrow
@@ -601,7 +595,7 @@ contract LendingPoolTest is DSTestPlus {
 
     function testUserLiquidatable(uint256 amount) public {
         // TODO: do test with variable prices
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         // Deposit tokens and enable them as collateral.
         mintAndApprove(asset, amount);
@@ -662,7 +656,7 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     function testEnableAsset(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         mintAndApprove(asset, amount);
         pool.deposit(asset, amount, false);
@@ -673,14 +667,14 @@ contract LendingPoolTest is DSTestPlus {
     }
 
     function testDisableAsset(uint256 amount) public {
-        hevm.assume(amount >= 1e5 && amount <= 1e27);
+        vm.assume(amount >= 1e5 && amount <= 1e27);
         
         mintAndApprove(asset, amount);
         pool.deposit(asset, amount, true);
 
         pool.disableAsset(asset);
 
-        assertFalse(pool.enabledCollateral(address(this), asset));
+        assertTrue(!pool.enabledCollateral(address(this), asset));
     }
     
     /*///////////////////////////////////////////////////////////////
@@ -688,7 +682,7 @@ contract LendingPoolTest is DSTestPlus {
     //////////////////////////////////////////////////////////////*/
 
     // Mint and approve assets.
-    function mintAndApprove(MockERC20 underlying, uint256 amount) internal {
+    function mintAndApprove(ERC20Mock underlying, uint256 amount) internal {
         underlying.mint(address(this), amount);
         underlying.approve(address(pool), amount);
     }

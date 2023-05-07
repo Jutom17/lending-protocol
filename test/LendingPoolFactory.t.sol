@@ -6,11 +6,11 @@ import {LendingPool, LendingPoolFactory} from "src/LendingPoolFactory.sol";
 import {MockPriceOracle} from "./mocks/MockPriceOracle.sol";
 import {PriceOracle} from "src/interface/PriceOracle.sol";
 
-import {Authority} from "solmate/auth/Auth.sol";
-import {DSTestPlus} from "solmate/test/utils/DSTestPlus.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import {DSTest} from "ds-test/test.sol";
 
 /// @title Lending Pool Factory Test Contract
-contract LendingPoolFactoryTest is DSTestPlus {
+contract LendingPoolFactoryTest is DSTest  {
     // Used variables.
     LendingPoolFactory factory;
     
