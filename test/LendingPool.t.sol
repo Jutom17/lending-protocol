@@ -3,8 +3,8 @@ pragma solidity 0.8.10;
 
 import {LendingPool, LendingPoolFactory} from "src/LendingPoolFactory.sol";
 
-// TODO: I should not have to import ERC20 from here.
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "forge-std/Test.sol";
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import {DSTest} from "ds-test/test.sol";
@@ -21,7 +21,7 @@ import {MockInterestRateModel} from "./mocks/MockInterestRateModel.sol";
 import {MockLiquidator} from "./mocks/MockLiquidator.sol";
 
 /// @title Lending Pool Factory Test Contract
-contract LendingPoolTest is DSTest {
+contract LendingPoolTest is DSTest, Test {
     /* Lending Pool Contracts */
     LendingPoolFactory factory;
     LendingPool pool;
@@ -40,7 +40,7 @@ contract LendingPoolTest is DSTest {
     MockLiquidator liquidator;
 
     function setUp() public {
-        factory = new LendingPoolFactory(address(this), Authority(address(0)));
+        factory = new LendingPoolFactory(address(this));
         (pool, ) = factory.deployLendingPool("Lending Pool Test");
 
         asset = new ERC20Mock("Test Token", "TEST", 18);

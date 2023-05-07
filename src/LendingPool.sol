@@ -24,10 +24,10 @@ contract LendingPool is Ownable {
 
     /// @notice Pool name.
     string public name;
+    ERC20 public tstContract;
 
-    /// @notice Create a new Lending Pool.
-    /// @dev Retrieves the pool name from the LendingPoolFactory contract.
-    constructor() {
+    constructor(address _tokenContract) {
+        tstContract = ERC20(_tokenContract);
         // Retrieve the name from the factory contract.
         name = LendingPoolFactory(msg.sender).poolDeploymentName();
         _transferOwnership(msg.sender);
@@ -155,44 +155,20 @@ contract LendingPool is Ownable {
     /// @param amount The amount being withdrew.
     event Withdraw(address indexed from, ERC20 indexed asset, uint256 amount);
 
-    /// @notice Deposit underlying tokens into the pool.
-    /// @param asset The underlying asset.
-    /// @param amount The amount to be deposited.
-    /// @param enable A boolean indicating whether to enable the underlying asset as collateral.
     function deposit(
-        ERC20 asset,
-        uint256 amount,
-        bool enable
+        uint256 amount
     ) external {
-        // Ensure the amount is valid.
         require(amount > 0, "INVALID_AMOUNT");
 
-        // Calculate the amount of internal balance units to be stored.
-        uint256 shares = amount.mulDivDown(baseUnits[asset], internalBalanceExchangeRate(asset));
-
-        // Modify the internal balance of the sender.
-        // Cannot overflow because the sum of all user
-        // balances won't be greater than type(uint256).max
         unchecked {
-            internalBalances[asset][msg.sender] += shares;
+            internalBalances[tstContract][msg.sender] += amount;
         }
 
-        // Add to the asset's total internal supply.
-        totalInternalBalances[asset] += shares;
+        totalInternalBalances[tstContract] += amount;
 
-        // Transfer underlying in from the user.
-        asset.safeTransferFrom(msg.sender, address(this), amount);
+        tstContract.safeTransferFrom(msg.sender, address(this), amount);
 
-        // Deposit the underlying tokens into the designated vault.
-        address vault = vaults[asset];
-        asset.approve(address(vault), amount);
-        vault.deposit(amount, address(this));
-
-        // If `enable` is set to true, enable the asset as collateral.
-        if (enable) enableAsset(asset);
-
-        // Emit the event.
-        emit Deposit(msg.sender, asset, amount);
+        emit Deposit(msg.sender, tstContract, amount);
     }
 
     /// @notice Withdraw underlying tokens from the pool.
@@ -208,7 +184,7 @@ contract LendingPool is Ownable {
         require(amount > 0, "AMOUNT_TOO_LOW");
 
         // Calculate the amount of internal balance units to be subtracted.
-        uint256 shares = amount.mulDivDown(baseUnits[asset], internalBalanceExchangeRate(asset));
+        uint256 shares = amount * baseUnits[asset] / internalBalanceExchangeRate(asset);
 
         // Modify the internal balance of the sender.
         internalBalances[asset][msg.sender] -= shares;
@@ -249,19 +225,12 @@ contract LendingPool is Ownable {
     /// @param amount The amount being repaid.
     event Repay(address indexed from, ERC20 indexed asset, uint256 amount);
 
-    /// @notice Borrow underlying tokens from the pool.
-    /// @param asset The underlying asset.
-    /// @param amount The amount to borrow.
     function borrow(ERC20 asset, uint256 amount) external {
-        // Ensure the amount is valid.
         require(amount > 0, "AMOUNT_TOO_LOW");
 
         // Accrue interest.
         // TODO: is this the right place to accrue interest?
         accrueInterest(asset);
-
-        // Enable the asset, if it is not already enabled.
-        enableAsset(asset);
 
         // Ensure the caller is able to execute this borrow.
         require(canBorrow(asset, msg.sender, amount));
@@ -512,7 +481,7 @@ contract LendingPool is Ownable {
     /// @param user The user to get the underlying balance of.
     function balanceOf(ERC20 asset, address user) public view returns (uint256) {
         // Multiply the user's internal balance units by the internal exchange rate of the asset.
-        return internalBalances[asset][user].mulDivDown(internalBalanceExchangeRate(asset), baseUnits[asset]);
+        return internalBalances[asset][user] * internalBalanceExchangeRate(asset) / baseUnits[asset];
     }
 
     /// @dev Returns the exchange rate between underlying tokens and internal balance units.
@@ -540,12 +509,8 @@ contract LendingPool is Ownable {
     /// @dev Maps assets to the total number of internal debt units "distributed" amongst borrowers.
     mapping(ERC20 => uint256) internal totalInternalDebt;
 
-    /// @notice Returns the underlying borrow balance of an address.
-    /// @param asset The underlying asset.
-    /// @param user The user to get the underlying borrow balance of.
     function borrowBalance(ERC20 asset, address user) public view returns (uint256) {
-        // Multiply the user's internal debt units by the internal debt exchange rate of the asset.
-        return internalDebt[asset][user].mulDivDown(internalDebtExchangeRate(asset), baseUnits[asset]);
+        return internalDebt[asset][user] * internalDebtExchangeRate(asset) / baseUnits[asset];
     }
 
     /// @dev Returns the exchange rate between underlying tokens and internal debt units.
@@ -634,73 +599,42 @@ contract LendingPool is Ownable {
         uint256 actualBorrowable;
     }
 
-    /// @dev Calculate the health factor of a user after a borrow occurs.
-    /// @param asset The underlying asset.
-    /// @param user The user to check.
-    /// @param amount The amount of underlying to borrow.
     function calculateHealthFactor(
         ERC20 asset,
         address user,
         uint256 amount
     ) public view returns (uint256) {
-        // Allocate memory to store the user's account liquidity.
         AccountLiquidity memory liquidity;
 
-        // Retrieve the user's utilized assets.
-        ERC20[] memory utilized = userCollateral[user];
-       
-        // User's hyptothetical borrow balance.
         uint256 hypotheticalBorrowBalance;
 
-        ERC20 currentAsset;
+        ERC20 _tstContract = tstContract;
 
-        // Iterate through the user's utilized assets.
-        for (uint256 i = 0; i < utilized.length; i++) {
-            
-            // Current user utilized asset.
-            currentAsset = utilized[i];
-            
-            // Calculate the user's maximum borrowable value for this asset.
-            // balanceOfUnderlying(asset,user) * ethPrice * collateralFactor.
-            liquidity.maximumBorrowable += balanceOf(currentAsset, user)
-                .mulDivDown(oracle.getUnderlyingPrice(currentAsset), baseUnits[currentAsset])
-                .mulDivDown(configurations[currentAsset].lendFactor, 1e18);
+        // Calculate the user's maximum borrowable value for this asset.
+        // balanceOfUnderlying(asset,user) * ethPrice * collateralFactor.
+        liquidity.maximumBorrowable += balanceOf(_tstContract, user)
+            .mulDivDown(oracle.getUnderlyingPrice(_tstContract), baseUnits[_tstContract])
+            .mulDivDown(configurations[_tstContract].lendFactor, 1e18);
 
-            // Check if current asset == underlying asset.
-            hypotheticalBorrowBalance = currentAsset == asset ? amount : 0;
-            
-            // Calculate the user's hypothetical borrow balance for this asset.
-            if (internalDebt[currentAsset][msg.sender] > 0) {
-                hypotheticalBorrowBalance += borrowBalance(currentAsset, user);
-            }
+        // Add the user's borrow balance in this asset to their total borrow balance.
+        liquidity.borrowBalance += hypotheticalBorrowBalance *
+            oracle.getUnderlyingPrice(_tstContract) /
+            baseUnits[_tstContract];
 
-            // Add the user's borrow balance in this asset to their total borrow balance.
-            liquidity.borrowBalance += hypotheticalBorrowBalance.mulDivDown(
-                oracle.getUnderlyingPrice(currentAsset),
-                baseUnits[currentAsset]
-            );
-
-            // Multiply the user's borrow balance in this asset by the borrow factor.
-            liquidity.borrowBalancesTimesBorrowFactors += hypotheticalBorrowBalance
-                .mulDivDown(oracle.getUnderlyingPrice(currentAsset), baseUnits[currentAsset])
-                .mulWadDown(configurations[currentAsset].borrowFactor);
-        }
+        // Multiply the user's borrow balance in this asset by the borrow factor.
+        liquidity.borrowBalancesTimesBorrowFactors += hypotheticalBorrowBalance
+            .mulDivDown(oracle.getUnderlyingPrice(_tstContract), baseUnits[_tstContract])
+            .mulWadDown(configurations[_tstContract].borrowFactor);
 
         // Calculate the user's actual borrowable value.
         uint256 actualBorrowable = liquidity
             .borrowBalancesTimesBorrowFactors
-            .divWadDown(liquidity.borrowBalance)
-            .mulWadDown(liquidity.maximumBorrowable);
+            / liquidity.borrowBalance
+            * liquidity.maximumBorrowable;
 
-        // Return whether the user's hypothetical borrow value is
-        // less than or equal to their borrowable value.
-        return actualBorrowable.divWadDown(liquidity.borrowBalance);
+        return actualBorrowable / liquidity.borrowBalance;
     }
 
-    /// @dev Identify whether a user is able to execute a borrow.
-    /// @param asset The underlying asset.
-    /// @param user The user to check.
-    /// @param amount The amount of underlying to borrow.
     function canBorrow(
         ERC20 asset,
         address user,
