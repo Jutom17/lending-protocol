@@ -55,7 +55,7 @@ contract LendingPool is Ownable {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Maps ERC20 token addresses to their respective Interest Rate Model.
-    mapping(ERC20 => InterestRateModel) public interestRateModels;
+    mapping(ERC20 => InterestRateModel) public interestRates;
 
     /// @notice Emitted when an InterestRateModel is changed.
     /// @param user The authorized user who triggered the change.
@@ -68,7 +68,7 @@ contract LendingPool is Ownable {
     /// @param newInterestRateModel The new IRM address.
     function setInterestRateModel(ERC20 asset, InterestRateModel newInterestRateModel) external onlyOwner {
         // Update the asset's Interest Rate Model.
-        interestRateModels[asset] = newInterestRateModel;
+        interestRates[asset] = newInterestRateModel;
 
         // Emit the event.
         emit InterestRateModelUpdated(msg.sender, asset, newInterestRateModel);
@@ -166,38 +166,20 @@ contract LendingPool is Ownable {
         emit Deposit(msg.sender, tstContract, amount);
     }
 
-    /// @notice Withdraw underlying tokens from the pool.
-    /// @param asset The underlying asset.
-    /// @param amount The amount to be withdrawn.
-    /// @param disable A boolean indicating whether to disable the underlying asset as collateral.
     function withdraw(
-        ERC20 asset,
-        uint256 amount,
-        bool disable
+        uint256 amount
     ) external {
         // Ensure the amount is valid.
         require(amount > 0, "AMOUNT_TOO_LOW");
 
-        // Calculate the amount of internal balance units to be subtracted.
-        uint256 shares = amount * baseUnits[asset] / internalBalanceExchangeRate(asset);
+        internalBalances[asset][msg.sender] -= amount;
 
-        // Modify the internal balance of the sender.
-        internalBalances[asset][msg.sender] -= shares;
-
-        // Subtract from the asset's total internal supply.
-        // Cannot undeflow because the user balance will 
-        // never be greater than the total suuply. 
         unchecked {
-            totalInternalBalances[asset] -= shares;
+            totalInternalBalances[asset] -= amount;
         }
 
-        // Transfer underlying to the user.
         asset.safeTransfer(msg.sender, amount);
 
-        // If `disable` is set to true, disable the asset as collateral.
-        if (disable) disableAsset(asset);
-
-        // Emit the event.
         emit Withdraw(msg.sender, asset, amount);
     }
 
@@ -220,63 +202,43 @@ contract LendingPool is Ownable {
     function borrow(ERC20 asset, uint256 amount) external {
         require(amount > 0, "AMOUNT_TOO_LOW");
 
-        // Accrue interest.
-        // TODO: is this the right place to accrue interest?
-        accrueInterest(asset);
+        enableLoan(asset);
 
-        // Ensure the caller is able to execute this borrow.
         require(canBorrow(asset, msg.sender, amount));
 
-        // Calculate the amount of internal debt units to be stored.
-        uint256 debtUnits = amount.mulDivDown(baseUnits[asset], internalDebtExchangeRate(asset));
-
-        // Update the internal borrow balance of the borrower.
-        // Cannot overflow because the sum of all user
-        // balances won't be greater than type(uint256).max
         unchecked {
-            internalDebt[asset][msg.sender] += debtUnits;
+            internalDebt[asset][msg.sender] += amount;
         }
 
-        // Add to the asset's total internal debt.
-        totalInternalDebt[asset] += debtUnits;
+        totalInternalDebt[asset] += amount;
 
-        // Update the cached debt of the asset.
         cachedTotalBorrows[asset] += amount;
 
-        // Transfer tokens to the borrower.
-        vaults[asset].withdraw(amount, address(this), address(this));
         asset.transfer(msg.sender, amount);
 
-        // Emit the event.
         emit Borrow(msg.sender, asset, amount);
     }
 
-    /// @notice Repay underlying tokens to the pool.
-    /// @param asset The underlying asset.
-    /// @param amount The amount to repay.
     function repay(ERC20 asset, uint256 amount) public {
-        // Ensure the amount is valid.
         require(amount > 0, "AMOUNT_TOO_LOW");
 
-        // Calculate the amount of internal debt units to be stored.
-        uint256 debtUnits = amount.mulDivDown(baseUnits[asset], internalDebtExchangeRate(asset));
+        uint256 normalizedAmount = normalizeAmount(amount, interestRates[asset]);
 
-        // Update the internal borrow balance of the borrower.
-        internalDebt[asset][msg.sender] -= debtUnits;
+        // confirm that the caller has loans to pay back
+        require(
+            normalizedAmount <= internalDebt[asset][msg.sender],
+            "loan payment too large"
+        );
 
-        // Add to the asset's total internal debt.
-        // Cannot undeflow because the user balance will 
-        // never be greater than the total suuply.
+        internalDebt[asset][msg.sender] -= amount;
+
         unchecked {
-            totalInternalDebt[asset] -= debtUnits;
+            totalInternalDebt[asset] -= amount;
         }
 
-        // Transfer tokens from the user.
-        asset.safeTransferFrom(msg.sender, address(this), amount - 1);
+        asset.safeTransferFrom(msg.sender, address(this), amount);
 
-        // Accrue interest.
-        // TODO: is this the right place to accrue interest?
-        accrueInterest(asset);
+        disableLoan(asset);
 
         // Emit the event.
         emit Repay(msg.sender, asset, amount);
@@ -286,8 +248,7 @@ contract LendingPool is Ownable {
                           LIQUIDATION INTERFACE
     //////////////////////////////////////////////////////////////*/
 
-    // Maximum health factor after liquidation.
-    uint256 public constant MAX_HEALTH_FACTOR = 1.25 * 1e18;
+    uint256 public constant MAX_HEALTH_FACTOR = 1.5 * 1e18;
 
     function liquidateUser(
         ERC20 borrowedAsset,
@@ -304,23 +265,16 @@ contract LendingPool is Ownable {
         require(calculateHealthFactor(borrowedAsset, borrower, 0) == MAX_HEALTH_FACTOR, "NOT_HEALTHY");
     }
 
-    /// @dev Returns a boolean indicating whether a user is liquidatable.
-    /// @param user The user to check.
     function userLiquidatable(address user) public view returns (bool) {
-        // Call canBorrow(), passing in a non-existant asset and a borrow amount of 0.
-        // This will just check the contract's current state.
         return !canBorrow(ERC20(address(0)), user, 0);
     }
 
-    /// @dev Calculates the total amount of collateral tokens to be seized on liquidation.
-    /// @param borrowedAsset The asset borrowed.
-    /// @param collateralAsset The asset used as collateral.
-    /// @param repayAmount The amount being repaid.
     function seizeCollateral(
         ERC20 borrowedAsset,
         ERC20 collateralAsset, 
         uint256 repayAmount
     ) public view returns (uint256) {
+
         return 0;
     }
 
@@ -328,35 +282,41 @@ contract LendingPool is Ownable {
                       COLLATERALIZATION INTERFACE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Emitted after an asset has been collateralized.
-    /// @param from The address that triggered the enablement.
-    /// @param asset The underlying asset.
-    event AssetEnabled(address indexed from, ERC20 indexed asset);
+    event AssetEnabled(address indexed from, ERC20 indexed asset, bool collateral);
 
-    /// @notice Emitted after an asset has been disabled.
-    /// @param from The address that triggered the disablement.
-    /// @param asset The underlying asset.
-    event AssetDisabled(address indexed from, ERC20 indexed asset);
+    event AssetDisabled(address indexed from, ERC20 indexed asset, bool collateral);
 
-    /// @notice Maps users to an array of assets they have listed as collateral.
     mapping(address => ERC20[]) public userCollateral;
 
-    /// @notice Maps users to a map from assets to boleans indicating whether they have listed as collateral.
+    mapping(address => ERC20[]) public userLoan;
+
     mapping(address => mapping(ERC20 => bool)) public enabledCollateral;
 
-    /// @notice Enable an asset as collateral.
+    mapping(address => mapping(ERC20 => bool)) public enabledLoan;
+
     function enableAsset(ERC20 asset) public {
-        // Ensure the user has not enabled this asset as collateral.
         if (enabledCollateral[msg.sender][asset]) {
             return;
         }
 
-        // Enable the asset as collateral.
         userCollateral[msg.sender].push(asset);
         enabledCollateral[msg.sender][asset] = true;
 
+        emit AssetEnabled(msg.sender, asset, true);
+    }
+
+    function enableLoan(ERC20 asset) public {
+        // Ensure the user has not enabled this asset as collateral.
+        if (enabledLoan[msg.sender][asset]) {
+            return;
+        }
+
+        // Enable the asset as collateral.
+        userLoan[msg.sender].push(asset);
+        enabledLoan[msg.sender][asset] = true;
+
         // Emit the event.
-        emit AssetEnabled(msg.sender, asset);
+        emit AssetEnabled(msg.sender, asset, false);
     }
 
     /// @notice Disable an asset as collateral.
@@ -385,7 +345,27 @@ contract LendingPool is Ownable {
         enabledCollateral[msg.sender][asset] = false;
 
         // Emit the event.
-        emit AssetDisabled(msg.sender, asset);
+        emit AssetDisabled(msg.sender, asset, true);
+    }
+
+    function disableLoan(ERC20 asset) public {
+        if (internalDebt[asset][msg.sender] > 0) return;
+
+        if (!enabledLoan[msg.sender][asset]) return;
+
+        for (uint256 i = 0; i < userLoan[msg.sender].length; i++) {
+            if (userLoan[msg.sender][i] == asset) {
+                ERC20 last = userLoan[msg.sender][userLoan[msg.sender].length - 1];
+
+                delete userLoan[msg.sender][userLoan[msg.sender].length - 1];
+
+                userLoan[msg.sender][i] = last;
+            }
+        }
+
+        enabledLoan[msg.sender][asset] = false;
+
+        emit AssetDisabled(msg.sender, asset, false);
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -419,12 +399,8 @@ contract LendingPool is Ownable {
     /// @dev Maps assets to the total number of internal balance units "distributed" amongst lenders.
     mapping(ERC20 => uint256) internal totalInternalBalances;
 
-    /// @notice Returns the underlying balance of an address.
-    /// @param asset The underlying asset.
-    /// @param user The user to get the underlying balance of.
     function balanceOf(ERC20 asset, address user) public view returns (uint256) {
-        // Multiply the user's internal balance units by the internal exchange rate of the asset.
-        return internalBalances[asset][user] * internalBalanceExchangeRate(asset) / baseUnits[asset];
+        return internalBalances[asset][user];
     }
 
     /// @dev Returns the exchange rate between underlying tokens and internal balance units.
@@ -479,37 +455,22 @@ contract LendingPool is Ownable {
     mapping(ERC20 => uint256) internal cachedTotalBorrows;
 
     /// @dev Store the block number of the last interest accrual for each asset.
-    mapping(ERC20 => uint256) internal lastInterestAccrual;
+    mapping(ERC20 => uint256) internal lastActivityBlockTimestamp;
 
-    /// @notice Returns the total amount of underlying tokens being loaned out to borrowers.
-    /// @param asset The underlying asset.
     function totalBorrows(ERC20 asset) public view returns (uint256) {
-        // Retrieve the Interest Rate Model for this asset.
-        InterestRateModel interestRateModel = interestRateModels[asset];
+        uint256 interestRate = interestRates[asset];
 
-        // Ensure the IRM has been set.
-        require(address(interestRateModel) != address(0), "INTEREST_RATE_MODEL_NOT_SET");
+        require(interestRate != 0, "INTEREST_RATE_NOT_SET");
 
-        // Calculate the LendingPool's current underlying balance.
-        // We cannot use totalUnderlying() here, as it calls this function,
-        // leading to an infinite loop.
-        uint256 underlying = availableLiquidity(asset) + cachedTotalBorrows[asset];
-
-        // Retrieve the per-block interest rate from the IRM.
-        uint256 interestRate = interestRateModel.getBorrowRate(underlying, cachedTotalBorrows[asset], 0);
-
-        // Calculate the block number delta between the last accrual and the current block.
-        uint256 blockDelta = block.number - lastInterestAccrual[asset];
+        uint256 secondsElapsed = block.timestamp - lastActivityBlockTimestamp[asset][msg.sender];
 
         // If the delta is equal to the block number (a borrow/repayment has never occured)
         // return a value of 0.
-        if (blockDelta == block.number) return cachedTotalBorrows[asset];
+        if (secondsElapsed == block.number) return internalDebt[asset][msg.sender];
 
-        // Calculate the interest accumulator.
-        uint256 interestAccumulator = interestRate.rpow(blockDelta, 1e18);
+        uint256 interestAccumulator = interestRate * secondsElapsed / (365 * 24 * 60 * 60);
 
-        // Accrue interest.
-        return cachedTotalBorrows[asset].mulWadDown(interestAccumulator);
+        return internalDebt[asset][msg.sender] * interestAccumulator / 1e18;
     }
 
     /// @dev Update the cached total borrow amount for a given asset.
@@ -519,7 +480,7 @@ contract LendingPool is Ownable {
         cachedTotalBorrows[asset] = totalBorrows(asset);
 
         // Update the block number of the last interest accrual.
-        lastInterestAccrual[asset] = block.number;
+        lastActivityBlockTimestamp[asset] = block.number;
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -549,33 +510,31 @@ contract LendingPool is Ownable {
     ) public view returns (uint256) {
         AccountLiquidity memory liquidity;
 
+        liquidity.maximumBorrowable += balanceOf(_tstContract, user)
+            * oracle.getUnderlyingPrice(_tstContract) / baseUnits[_tstContract];
+
+        ERC20[] memory utilized = userLoan[user];
+
         uint256 hypotheticalBorrowBalance;
 
-        ERC20 _tstContract = tstContract;
+        ERC20 currentAsset;
 
-        // Calculate the user's maximum borrowable value for this asset.
-        // balanceOfUnderlying(asset,user) * ethPrice * collateralFactor.
-        liquidity.maximumBorrowable += balanceOf(_tstContract, user)
-            .mulDivDown(oracle.getUnderlyingPrice(_tstContract), baseUnits[_tstContract])
-            .mulDivDown(configurations[_tstContract].lendFactor, 1e18);
+        for (uint256 i = 0; i < utilized.length; i++) {
 
-        // Add the user's borrow balance in this asset to their total borrow balance.
-        liquidity.borrowBalance += hypotheticalBorrowBalance *
-            oracle.getUnderlyingPrice(_tstContract) /
-            baseUnits[_tstContract];
+            currentAsset = utilized[i];
 
-        // Multiply the user's borrow balance in this asset by the borrow factor.
-        liquidity.borrowBalancesTimesBorrowFactors += hypotheticalBorrowBalance
-            .mulDivDown(oracle.getUnderlyingPrice(_tstContract), baseUnits[_tstContract])
-            .mulWadDown(configurations[_tstContract].borrowFactor);
+            hypotheticalBorrowBalance = currentAsset == asset ? amount : 0;
 
-        // Calculate the user's actual borrowable value.
-        uint256 actualBorrowable = liquidity
-            .borrowBalancesTimesBorrowFactors
-            / liquidity.borrowBalance
-            * liquidity.maximumBorrowable;
+            if (internalDebt[currentAsset][msg.sender] > 0) {
+                hypotheticalBorrowBalance += borrowBalance(currentAsset, user);
+            }
 
-        return actualBorrowable / liquidity.borrowBalance;
+            // Add the user's borrow balance in this asset to their total borrow balance.
+            liquidity.borrowBalance += hypotheticalBorrowBalance
+                * oracle.getUnderlyingPrice(_tstContract) / baseUnits[_tstContract];
+        }
+
+        return liquidity.maximumBorrowable * 1e18 / liquidity.borrowBalance;
     }
 
     function canBorrow(
@@ -612,5 +571,23 @@ contract LendingPool is Ownable {
     /// @param user The user.
     function getCollateral(address user) external returns (ERC20[] memory) {
         return userCollateral[user];
+    }
+
+    function denormalizeAmount(
+        uint256 normalizedAmount,
+        uint256 interest
+    ) public view returns (uint256) {
+        return
+        (normalizedAmount * interest) /
+        1e18;
+    }
+
+    function normalizeAmount(
+        uint256 denormalizedAmount,
+        uint256 interest
+    ) public view returns (uint256) {
+        return
+        (denormalizedAmount * 1e18) /
+        interest;
     }
 }

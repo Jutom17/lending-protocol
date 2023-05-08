@@ -89,14 +89,14 @@ contract LendingPoolTest is DSTest, Test {
     //////////////////////////////////////////////////////////////*/
 
     function testIRMConfiguration() public {
-        assertEq(address(pool.interestRateModels(asset)), address(interestRateModel));
+        assertEq(address(pool.interestRates(asset)), address(interestRateModel));
     }
 
     function testNewIRMConfiguration() public {
         MockInterestRateModel newInterestRateModel = new MockInterestRateModel();
         pool.setInterestRateModel(asset, InterestRateModel(address(newInterestRateModel)));
         
-        assertEq(address(pool.interestRateModels(asset)), address(newInterestRateModel));
+        assertEq(address(pool.interestRates(asset)), address(newInterestRateModel));
     }
     
     /*///////////////////////////////////////////////////////////////
