@@ -35,7 +35,7 @@ contract LendingPool is BorrowLendState {
     }
 
     modifier notClosed(uint256 loanId) {
-        require(!loanInfo[loanId].closed, "NFTLoanFacilitator: loan closed");
+        require(!loanInfo[loanId].closed, "loan closed");
         _;
     }
 
@@ -70,87 +70,48 @@ contract LendingPool is BorrowLendState {
     }
 
     /*///////////////////////////////////////////////////////////////
-                          IRM CONFIGURATION
+                          CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Maps ERC20 token addresses to their respective Interest Rate Model.
-    mapping(ERC20 => InterestRateModel) public interestRates;
+    mapping(ERC20 => uint256) public interestRates;
 
-    /// @notice Emitted when an InterestRateModel is changed.
-    /// @param user The authorized user who triggered the change.
-    /// @param asset The underlying asset whose IRM was modified.
-    /// @param newInterestRateModel The new IRM address.
-    event InterestRateModelUpdated(address user, ERC20 asset, InterestRateModel newInterestRateModel);
+    event InterestRateUpdated(address user, ERC20 asset, uint256 newInterestRate);
 
-    /// @notice Sets a new Interest Rate Model for a specfic asset.
-    /// @param asset The underlying asset.
-    /// @param newInterestRateModel The new IRM address.
-    function setInterestRateModel(ERC20 asset, InterestRateModel newInterestRateModel) external onlyOwner {
-        // Update the asset's Interest Rate Model.
-        interestRates[asset] = newInterestRateModel;
+    function setInterestRate(ERC20 asset, uint256 newInterestRate) external onlyAdmin {
+        interestRates[asset] = newInterestRate;
 
-        // Emit the event.
-        emit InterestRateModelUpdated(msg.sender, asset, newInterestRateModel);
+        emit InterestRateUpdated(msg.sender, asset, newInterestRate);
+    }
+
+    event CollateralizationRatioUpdated(address user, uint256 newInterestRate);
+
+    function setCollateralRatio(uint256 newInterestRate) external onlyAdmin {
+        state.collateralizationRatio = newInterestRate;
+
+        emit CollateralizationRatioUpdated(msg.sender, newInterestRate);
     }
 
     /*///////////////////////////////////////////////////////////////
                           ASSET CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    mapping(ERC20 => address) public vaults;
+    mapping(ERC20 => bool) public configurations;
 
-    /// @notice Maps underlying tokens to their configurations.
-    mapping(ERC20 => Configuration) public configurations;
-
-    /// @notice Maps underlying assets to their base units.
-    /// 10**asset.decimals().
     mapping(ERC20 => uint256) public baseUnits;
 
     event AssetConfigured(
         address indexed user,
         ERC20 indexed asset,
-        address indexed vault,
-        Configuration configuration
+        bool enabled
     );
 
-    /// @notice Emitted when an asset configuration is updated.
-    /// @param user The authorized user who triggered the change.
-    /// @param asset The underlying asset.
-    /// @param newConfiguration The new lend/borrow factors for the asset.
-    event AssetConfigurationUpdated(address indexed user, ERC20 indexed asset, Configuration newConfiguration);
-
-    /// @dev Asset configuration struct.
-    struct Configuration {
-        uint256 lendFactor;
-        uint256 borrowFactor;
-    }
-
     function configureAsset(
-        ERC20 asset,
-        address vault,
-        Configuration memory configuration
-    ) external onlyOwner {
-        // Ensure that this asset has not been configured.
-        require(address(vaults[asset]) == address(0), "ASSET_ALREADY_CONFIGURED");
-
-        // Configure the asset.
-        vaults[asset] = vault;
-        configurations[asset] = configuration;
+        ERC20 asset
+    ) external onlyAdmin {
+        configurations[asset] = enabled;
         baseUnits[asset] = 10**asset.decimals();
 
-        // Emit the event.
-        emit AssetConfigured(msg.sender, asset, vault, configuration);
-    }
-
-    /// @notice Updates the lend/borrow factors of an asset.
-    /// @param asset The underlying asset.
-    /// @param newConfiguration The new lend/borrow factors for the asset.
-    function updateConfiguration(ERC20 asset, Configuration memory newConfiguration) external onlyOwner {
-        // Update the asset configuration.
-        configurations[asset] = newConfiguration;
-
-        // Emit the event.
-        emit AssetConfigurationUpdated(msg.sender, asset, newConfiguration);
+        emit AssetConfigured(msg.sender, asset, enabled);
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -232,7 +193,25 @@ contract LendingPool is BorrowLendState {
 
         unchecked {
             internalDebt[asset][msg.sender] += amount;
+            id = _nonce++;
         }
+
+        uint64 collateralPrice = oracle.getUnderlyingPrice(tokenContract);
+
+        uint64 borrowAssetPrice = oracle.getUnderlyingPrice(currentAsset);
+
+        Loan storage loan = loanInfo[id];
+        loan.loanAssetContractAddress = address(asset);
+        loan.loanAmount = amount;
+        loan.startTime = uint40(block.timestamp);
+        loan.collateralAmount =
+            (amount *
+                state.collateralizationRatioPrecision *
+                borrowAssetPrice *
+                10 ** collateralTokenDecimals()) /
+            (state.collateralizationRatio *
+                collateralPrice *
+                10 ** borrowTokenDecimals());
 
         totalInternalDebt[asset] += amount;
 
@@ -243,9 +222,15 @@ contract LendingPool is BorrowLendState {
         emit Borrow(msg.sender, asset, amount);
     }
 
-    function repay(ERC20 asset, uint256 amount) public {
-        require(amount > 0, "AMOUNT_TOO_LOW");
+    function repayAndCloseLoan(uint256 loanId) public notClosed(loanId) {
+        Loan storage loan = loanInfo[loanId];
 
+        uint256 interest = _interestOwed(
+            loan.loanAmount,
+            loan.lastAccumulatedTimestamp,
+            loan.perAnumInterestRate
+        );
+        loan.closed = true;
         uint256 normalizedAmount = normalizeAmount(amount, interestRates[asset]);
 
         // confirm that the caller has loans to pay back
@@ -260,48 +245,37 @@ contract LendingPool is BorrowLendState {
             totalInternalDebt[asset] -= amount;
         }
 
-        asset.safeTransferFrom(msg.sender, address(this), amount);
+        asset.safeTransferFrom(msg.sender, address(this), interest + loan.loanAmount);
 
         disableLoan(asset);
 
         // Emit the event.
-        emit Repay(msg.sender, asset, amount);
+        emit Repay(msg.sender, asset, interest + loan.loanAmount);
     }
 
     /*///////////////////////////////////////////////////////////////
                           LIQUIDATION INTERFACE
     //////////////////////////////////////////////////////////////*/
 
-    uint256 public constant MAX_HEALTH_FACTOR = 1.5 * 1e18;
+    function userLiquidatable(address user) public view returns (bool) {
+        return !(calculateHealthFactor(address(0), user, 0) >= state.collateralizationRatio);
+    }
 
-    function liquidateUser(
-        ERC20 borrowedAsset,
-        ERC20 collateralAsset, 
-        address borrower,
-        uint256 repayAmount
-    ) external {
+    function liquidateUser(uint256 loanId, address sendCollateralTo) external override notClosed(loanId) onlyAdmin {
         require(userLiquidatable(borrower), "CANNOT_LIQUIDATE_HEALTHY_USER");
 
-        // Calculate the number of collateral asset to be seized
-        uint256 seizedCollateralAmount = seizeCollateral(borrowedAsset, collateralAsset, repayAmount);
+        Loan storage loan = loanInfo[loanId];
 
-        // Assert user health factor is == MAX_HEALTH_FACTOR
-        require(calculateHealthFactor(borrowedAsset, borrower, 0) == MAX_HEALTH_FACTOR, "NOT_HEALTHY");
+        loan.closed = true;
+        tokenContract.safeTransferFrom(
+            address(this),
+            sendCollateralTo,
+            loan.collateralAmount
+        );
+
+        emit SeizeCollateral(loanId);
+        emit Close(loanId);
     }
-
-    function userLiquidatable(address user) public view returns (bool) {
-        return !canBorrow(ERC20(address(0)), user, 0);
-    }
-
-    function seizeCollateral(
-        ERC20 borrowedAsset,
-        ERC20 collateralAsset, 
-        uint256 repayAmount
-    ) public view returns (uint256) {
-
-        return 0;
-    }
-
     /*///////////////////////////////////////////////////////////////
                       COLLATERALIZATION INTERFACE
     //////////////////////////////////////////////////////////////*/
@@ -602,8 +576,7 @@ contract LendingPool is BorrowLendState {
         uint256 interest
     ) public view returns (uint256) {
         return
-        (normalizedAmount * interest) /
-        1e18;
+            (normalizedAmount * interest) / 1e18;
     }
 
     function normalizeAmount(
@@ -611,8 +584,7 @@ contract LendingPool is BorrowLendState {
         uint256 interest
     ) public view returns (uint256) {
         return
-        (denormalizedAmount * 1e18) /
-        interest;
+            (denormalizedAmount * 1e18) / interest;
     }
 
     function maxAllowedToWithdraw(address account)
@@ -620,7 +592,7 @@ contract LendingPool is BorrowLendState {
     view
     returns (uint256)
     {
-        ERC20[] memory utilized = userLoan[user];
+        ERC20[] memory utilized = userLoan[account];
 
         ERC20 currentAsset;
 
@@ -654,5 +626,42 @@ contract LendingPool is BorrowLendState {
             }
         }
         return maxAllowedToWithdrawWithPrices;
+    }
+
+    function seizeCollateral(
+        ERC20 borrowedAsset,
+        ERC20 collateralAsset,
+        uint256 borrowedAmount
+    ) public view returns (uint256) {
+        uint64 collateralPrice = oracle.getUnderlyingPrice(tokenContract);
+
+        uint256 deposited = state.accountAssets[account].deposited;
+
+        uint64 borrowAssetPrice = oracle.getUnderlyingPrice(currentAsset);
+
+        maxAllowedToWithdrawWithPrices = deposited -
+            (borrowedAmount *
+                state.collateralizationRatioPrecision *
+                borrowAssetPrice *
+                10 ** collateralTokenDecimals()) /
+            (state.collateralizationRatio *
+                collateralPrice *
+                10 ** borrowTokenDecimals());
+        return 0;
+    }
+
+    function _interestOwed(
+        uint256 loanAmount,
+        uint256 startTime,
+        uint256 interestRate
+    )
+    internal
+    view
+    returns (uint256)
+    {
+        return loanAmount
+            * (block.timestamp - startTime)
+            * (interestRate * 1e18 / 365 days)
+            / 1e21;
     }
 }
