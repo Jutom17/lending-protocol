@@ -2,30 +2,49 @@
 pragma solidity 0.8.10;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 import {PriceOracle} from "./interface/PriceOracle.sol";
-import {InterestRateModel} from "./interface/InterestRateModel.sol";
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "solmate/src/utils/SafeTransferLib.sol";
+import "./BorrowLendState.sol";
 
-/// @title Lending Pool
-/// @author Jet Jadeja <jet@pentagon.xyz>
-/// @notice Minimal, gas optimized lending pool contract
-contract LendingPool is Ownable {
+contract LendingPool is BorrowLendState {
     using SafeERC20 for ERC20;
+    using SafeTransferLib for ERC20;
 
-    /*///////////////////////////////////////////////////////////////
-                                IMMUTABLES
-    //////////////////////////////////////////////////////////////*/
+    uint8 public constant override INTEREST_RATE_DECIMALS = 3;
+
+    uint256 public constant override SCALAR = 10 ** INTEREST_RATE_DECIMALS;
 
     /// @notice Pool name.
     string public name;
-    ERC20 public tstContract;
+    ERC20 public tokenContract;
 
-    constructor(address _tokenContract) {
-        tstContract = ERC20(_tokenContract);
-        _transferOwnership(msg.sender);
+    address public override borrowTicketContract;
+
+    mapping(uint256 => Loan) public loanInfo;
+
+    uint256 private _nonce = 1;
+    address public admin;
+
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only admin can perform this action");
+        _;
+    }
+
+    modifier notClosed(uint256 loanId) {
+        require(!loanInfo[loanId].closed, "NFTLoanFacilitator: loan closed");
+        _;
+    }
+
+    constructor(address _tokenContract, uint256 _collateralizationRatio) {
+        tokenContract = ERC20(_tokenContract);
+        state.collateralizationRatio = _collateralizationRatio;
+        state.collateralizationRatioPrecision = 1e18;
+
+        admin = msg.sender;
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -152,35 +171,40 @@ contract LendingPool is Ownable {
 
     function deposit(
         uint256 amount
-    ) external {
+    ) external nonReentrant {
         require(amount > 0, "INVALID_AMOUNT");
 
         unchecked {
-            internalBalances[tstContract][msg.sender] += amount;
+            state.accountAssets[msg.sender].deposited += amount;
         }
 
-        totalInternalBalances[tstContract] += amount;
+        state.totalAssets.deposited += amount;
 
-        tstContract.safeTransferFrom(msg.sender, address(this), amount);
+        tokenContract.safeTransferFrom(msg.sender, address(this), amount);
 
-        emit Deposit(msg.sender, tstContract, amount);
+        emit Deposit(msg.sender, tokenContract, amount);
     }
 
     function withdraw(
         uint256 amount
-    ) external {
+    ) external nonReentrant {
         // Ensure the amount is valid.
         require(amount > 0, "AMOUNT_TOO_LOW");
 
-        internalBalances[asset][msg.sender] -= amount;
+        require(
+            amount < maxAllowedToWithdraw(_msgSender()),
+            "amount >= maxAllowedToWithdraw(msg.sender)"
+        );
+
+        state.accountAssets[msg.sender].deposited -= amount;
 
         unchecked {
-            totalInternalBalances[asset] -= amount;
+            state.totalAssets.deposited -= amount;
         }
 
-        asset.safeTransfer(msg.sender, amount);
+        tokenContract.safeTransfer(msg.sender, amount);
 
-        emit Withdraw(msg.sender, asset, amount);
+        emit Withdraw(msg.sender, tokenContract, amount);
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -394,20 +418,20 @@ contract LendingPool is Ownable {
     /// @dev Maps assets to user addresses to their balances, which are not denominated in underlying.
     /// Instead, these values are denominated in internal balance units, which internally account
     /// for user balances, increasing in value as the LendingPool earns more interest.
-    mapping(ERC20 => mapping(address => uint256)) internal internalBalances;
+    mapping(ERC20 => mapping(address => uint256)) internal accountAssets;
 
     /// @dev Maps assets to the total number of internal balance units "distributed" amongst lenders.
-    mapping(ERC20 => uint256) internal totalInternalBalances;
+    mapping(ERC20 => uint256) internal totalAssets;
 
     function balanceOf(ERC20 asset, address user) public view returns (uint256) {
-        return internalBalances[asset][user];
+        return accountAssets[asset][user];
     }
 
     /// @dev Returns the exchange rate between underlying tokens and internal balance units.
     /// In other words, this function returns the value of one internal balance unit, denominated in underlying.
     function internalBalanceExchangeRate(ERC20 asset) internal view returns (uint256) {
         // Retrieve the total internal balance supply.
-        uint256 totalInternalBalance = totalInternalBalances[asset];
+        uint256 totalInternalBalance = totalAssets[asset];
 
         // If it is 0, return an exchange rate of 1.
         if (totalInternalBalance == 0) return baseUnits[asset];
@@ -589,5 +613,46 @@ contract LendingPool is Ownable {
         return
         (denormalizedAmount * 1e18) /
         interest;
+    }
+
+    function maxAllowedToWithdraw(address account)
+    public
+    view
+    returns (uint256)
+    {
+        ERC20[] memory utilized = userLoan[user];
+
+        ERC20 currentAsset;
+
+        uint64 collateralPrice = oracle.getUnderlyingPrice(tokenContract);
+
+        uint256 deposited = state.accountAssets[account].deposited;
+        uint256 denormalizedBorrowed;
+        uint256 maxAllowedToWithdrawWithPrices = deposited;
+
+        // Iterate through the user's utilized assets.
+        for (uint256 i = 0; i < utilized.length; i++) {
+
+            // Current user utilized asset.
+            currentAsset = utilized[i];
+
+            if (internalDebt[currentAsset][msg.sender] > 0) {
+                uint64 borrowAssetPrice = oracle.getUnderlyingPrice(currentAsset);
+
+                denormalizedBorrowed += denormalizeAmount(
+                    internalDebt[currentAsset][msg.sender],
+                    interestRates[currentAsset]
+                );
+                maxAllowedToWithdrawWithPrices = maxAllowedToWithdrawWithPrices -
+                    (denormalizedBorrowed *
+                        state.collateralizationRatioPrecision *
+                        borrowAssetPrice *
+                        10 ** collateralTokenDecimals()) /
+                    (state.collateralizationRatio *
+                        collateralPrice *
+                        10 ** borrowTokenDecimals());
+            }
+        }
+        return maxAllowedToWithdrawWithPrices;
     }
 }
