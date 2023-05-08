@@ -1,7 +1,7 @@
 pragma solidity 0.8.10;
 
 /// TODO: Should not have to import erc20 from here.
-import {ERC20} from "solmate/utils/SafeTransferLib.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @title Mock Price Oracle
 /// @dev This contract is used to replicate a Price Oracle contract

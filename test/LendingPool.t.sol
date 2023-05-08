@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.10;
 
-import {LendingPool, LendingPoolFactory} from "src/LendingPoolFactory.sol";
+import {LendingPool} from "src/LendingPool.sol";
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "forge-std/Test.sol";
@@ -11,19 +11,14 @@ import {DSTest} from "ds-test/test.sol";
 
 import {PriceOracle} from "src/interface/PriceOracle.sol";
 import {InterestRateModel} from "src/interface/InterestRateModel.sol";
-import {FlashBorrower} from "src/interface/FlashBorrower.sol";
 
 import "@openzeppelin/contracts/mocks/ERC20Mock.sol";
 import {MockPriceOracle} from "./mocks/MockPriceOracle.sol";
-import {MockFlashBorrower} from "./mocks/MockFlashBorrower.sol";
-import {MockFlashBorrower2} from "./mocks/MockFlashBorrower2.sol";
 import {MockInterestRateModel} from "./mocks/MockInterestRateModel.sol";
 import {MockLiquidator} from "./mocks/MockLiquidator.sol";
 
 /// @title Lending Pool Factory Test Contract
 contract LendingPoolTest is DSTest, Test {
-    /* Lending Pool Contracts */
-    LendingPoolFactory factory;
     LendingPool pool;
 
     /* Mocks */
@@ -34,14 +29,11 @@ contract LendingPoolTest is DSTest, Test {
     address borrowVault;
 
     MockPriceOracle oracle;
-    MockFlashBorrower flashBorrower;
-    MockFlashBorrower2 flashBorrower2;
     MockInterestRateModel interestRateModel;
     MockLiquidator liquidator;
 
     function setUp() public {
-        factory = new LendingPoolFactory(address(this));
-        (pool, ) = factory.deployLendingPool("Lending Pool Test");
+        pool = new LendingPool(address(this));
 
         asset = new ERC20Mock("Test Token", "TEST", 18);
         vault = address(ERC20(asset), "Test Token Vault", "TEST");
@@ -470,123 +462,6 @@ contract LendingPoolTest is DSTest, Test {
 
         // Checks.
         assertTrue(pool.enabledCollateral(address(this), borrowAsset));
-    }
-
-    /*///////////////////////////////////////////////////////////////
-                            FLASH LOAN TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function testFlashBorrow(uint256 amount) public {
-        vm.assume(amount >= 1e5 && amount <= 1e27);
-        
-        flashBorrower = new MockFlashBorrower();
-        
-        // Deposit tokens and enable them as collateral.
-        mintAndApprove(asset, amount);
-        pool.deposit(asset, amount, true);
-
-        // Mint borrow tokens and supply them to the pool.
-        mintAndApprove(borrowAsset, amount / 4);
-        pool.deposit(borrowAsset, amount / 4, false);
-
-        // Set the price of collateral to 1 ETH.
-        oracle.updatePrice(asset, 1e18);
-
-        // Set the price of the borrow asset to 2 ETH.
-        // This means that with a 0.5 lend factor, we should be able to borrow 0.25 ETH.
-        oracle.updatePrice(borrowAsset, 2e18);
-
-        // Encode the address of the borrow asset
-        bytes memory data = abi.encode(address(borrowAsset));
-
-        // Approve pool to use 'amount' from flashBorrower
-        vm.startPrank(address(flashBorrower));
-        borrowVault.approve(address(pool), amount);
-
-        pool.flashBorrow(
-            FlashBorrower(address(flashBorrower)),
-            data,
-            borrowAsset,
-            amount / 4 
-        );
-    }
-
-    /*///////////////////////////////////////////////////////////////
-                      FLASH LOAN SANITY CHECK TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    // Cases where flash loans must not work.
-    // - Not Enough Liquidity to flash borrow
-    // - Ensure that a flash Borrow is not occuring
-    function testFailFlashBorrowNotEnoughLiquidity(uint256 amount) public {
-        vm.assume(amount >= 1e5 && amount <= 1e27);
-        
-        flashBorrower = new MockFlashBorrower();
-        
-        // Deposit tokens and enable them as collateral.
-        mintAndApprove(asset, amount);
-        pool.deposit(asset, amount, true);
-
-        // Mint borrow tokens and supply them to the pool.
-        mintAndApprove(borrowAsset, amount / 4);
-        pool.deposit(borrowAsset, amount / 4, false);
-
-        // Set the price of collateral to 1 ETH.
-        oracle.updatePrice(asset, 1e18);
-
-        // Set the price of the borrow asset to 2 ETH.
-        // This means that with a 0.5 lend factor, we should be able to borrow 0.25 ETH.
-        oracle.updatePrice(borrowAsset, 2e18);
-
-        // Encode the address of the borrow asset
-        bytes memory data = abi.encode(address(borrowAsset));
-
-        // Approve pool to use 'amount' from flashBorrower
-        vm.startPrank(address(flashBorrower));
-        borrowVault.approve(address(pool), amount);
-
-        pool.flashBorrow(
-            FlashBorrower(address(flashBorrower)),
-            data,
-            borrowAsset,
-            amount // Borrowing the full amount instead of amount/4
-        );
-    }
-
-    function testFailFlashBorrowTwice(uint256 amount) public {
-        vm.assume(amount >= 1e5 && amount <= 1e27);
-        
-        flashBorrower2 = new MockFlashBorrower2();
-        
-        // Deposit tokens and enable them as collateral.
-        mintAndApprove(asset, amount);
-        pool.deposit(asset, amount, true);
-
-        // Mint borrow tokens and supply them to the pool.
-        mintAndApprove(borrowAsset, amount / 4);
-        pool.deposit(borrowAsset, amount / 4, false);
-
-        // Set the price of collateral to 1 ETH.
-        oracle.updatePrice(asset, 1e18);
-
-        // Set the price of the borrow asset to 2 ETH.
-        // This means that with a 0.5 lend factor, we should be able to borrow 0.25 ETH.
-        oracle.updatePrice(borrowAsset, 2e18);
-
-        // Encode the address of the borrow asset
-        bytes memory data = abi.encode(address(borrowAsset));
-
-        // Approve pool to use 'amount' from flashBorrower
-        vm.startPrank(address(flashBorrower2));
-        borrowVault.approve(address(pool), amount);
-
-        // Flash borrow
-        pool.flashBorrow(
-            FlashBorrower(address(flashBorrower2)),
-            data,
-            borrowAsset,
-            amount / 4 
-        );
     }
 
     /*///////////////////////////////////////////////////////////////

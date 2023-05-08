@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.10;
 
-import {LendingPoolFactory} from "./LendingPoolFactory.sol";
-
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 import {PriceOracle} from "./interface/PriceOracle.sol";
 import {InterestRateModel} from "./interface/InterestRateModel.sol";
-import {FlashBorrower} from "./interface/FlashBorrower.sol";
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -28,8 +25,6 @@ contract LendingPool is Ownable {
 
     constructor(address _tokenContract) {
         tstContract = ERC20(_tokenContract);
-        // Retrieve the name from the factory contract.
-        name = LendingPoolFactory(msg.sender).poolDeploymentName();
         _transferOwnership(msg.sender);
     }
 
@@ -196,9 +191,6 @@ contract LendingPool is Ownable {
             totalInternalBalances[asset] -= shares;
         }
 
-        // Withdraw the underlying tokens from the designated vault.
-        vaults[asset].withdraw(amount, address(this), address(this));
-
         // Transfer underlying to the user.
         asset.safeTransfer(msg.sender, amount);
 
@@ -288,55 +280,6 @@ contract LendingPool is Ownable {
 
         // Emit the event.
         emit Repay(msg.sender, asset, amount);
-    }
-
-    /*///////////////////////////////////////////////////////////////
-                          FLASH BORROW INTERFACE
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Emitted after a successful flash borrow.
-    /// @param from The address that triggered the flash borrow.
-    /// @param borrower The borrower.
-    event FlashBorrow(address indexed from, FlashBorrower indexed borrower, ERC20 indexed asset, uint256 amount);
-
-    /// @notice Maps assets to the number of underlying being flash borrowed.
-    mapping(ERC20 => uint256) flashBorrowed;
-
-    /// @notice Execute a flash loan. This code will fail if the funds
-    /// are not returned to the contract by the end of the transaction.
-    /// @param borrower The address of the FlashBorrower contract to call.
-    /// @param data The data to be passed to the FlashBorrower contract.
-    /// @param asset The underlying asset.
-    /// @param amount The amount to borrow.
-    function flashBorrow(
-        FlashBorrower borrower,
-        bytes memory data,
-        ERC20 asset,
-        uint256 amount
-    ) external {
-        // Ensure that a flash borrow is not occuring in this asset.
-        require(flashBorrowed[asset] == 0, "FLASH_BORROW_IN_PROGRESS");
-
-        // Store the available liquidity before the borrow.
-        uint256 liquidity = availableLiquidity(asset);
-
-        // Withdraw the amount from the Vault and transfer it to the borrower.
-        vaults[asset].withdraw(amount, address(borrower), address(this));
-
-        // Update the flash borrow amount.
-        flashBorrowed[asset] = amount;
-
-        // Call the borrower.execute function.
-        borrower.execute(amount, data);
-
-        // Ensure the sufficient amount has been returned.
-        address vault = vaults[asset];
-        require(vault.convertToAssets(vault.balanceOf(address(this))) + amount > liquidity, "AMOUNT_NOT_RETURNED");
-        // Reset the flash borrow amount.
-        delete flashBorrowed[asset];
-
-        // Emit the event.
-        emit FlashBorrow(msg.sender, borrower, asset, amount);
     }
 
     /*///////////////////////////////////////////////////////////////
@@ -454,7 +397,7 @@ contract LendingPool is Ownable {
     function totalUnderlying(ERC20 asset) public view returns (uint256) {
         // Return the total amount of underlying tokens in the pool.
         // This includes the LendingPool's currently held assets and all of the assets being borrowed.
-        return availableLiquidity(asset) + totalBorrows(asset) + flashBorrowed[asset];
+        return availableLiquidity(asset) + totalBorrows(asset);
     }
 
     /// @notice Returns the amount of underlying tokens held in this contract.
@@ -550,7 +493,7 @@ contract LendingPool is Ownable {
         // Calculate the LendingPool's current underlying balance.
         // We cannot use totalUnderlying() here, as it calls this function,
         // leading to an infinite loop.
-        uint256 underlying = availableLiquidity(asset) + cachedTotalBorrows[asset] + flashBorrowed[asset];
+        uint256 underlying = availableLiquidity(asset) + cachedTotalBorrows[asset];
 
         // Retrieve the per-block interest rate from the IRM.
         uint256 interestRate = interestRateModel.getBorrowRate(underlying, cachedTotalBorrows[asset], 0);
