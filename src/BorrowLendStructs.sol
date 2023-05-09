@@ -12,4 +12,5 @@ struct Loan {
     address loanAssetContractAddress;
     uint128 loanAmount;
     uint256 collateralAmount;
+    address borrowerAddress;
 }

@@ -1,19 +1,15 @@
-pragma solidity 0.8.10;
+pragma solidity ^0.8.13;
 
-/// TODO: Should not have to import erc20 from here.
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @title Mock Price Oracle
-/// @dev This contract is used to replicate a Price Oracle contract
-/// for unit tests.
 contract MockPriceOracle {
-    mapping(ERC20 => uint256) public prices;
+    mapping(ERC20 => uint64) public prices;
 
-    function updatePrice(ERC20 asset, uint256 price) external {
+    function updatePrice(ERC20 asset, uint64 price) external {
         prices[asset] = price;
     }
 
-    function getUnderlyingPrice(ERC20 asset) public view returns (uint256) {
+    function getUnderlyingPrice(ERC20 asset) public view returns (uint64) {
         return prices[asset];
     }
 }
